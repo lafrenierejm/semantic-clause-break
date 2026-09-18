@@ -46,7 +46,18 @@
           };
         in
         {
-          # nix build .#foreign
+          apps.check-zig-zon-lock = {
+            type = "app";
+            meta.description = "Check freshness of build.zig.zon2json-lock.";
+            program = pkgs.lib.getExe (
+              pkgs.writeShellApplication {
+                name = "check-zig-zon-lock";
+                runtimeInputs = [ env.zig2nix ];
+                text = builtins.readFile ./scripts/check-zig-zon-lock.sh;
+              }
+            );
+          };
+
           packages = rec {
             foreign = env.package {
               # binary to be shipped outside of Nix
@@ -89,6 +100,14 @@
               trim-trailing-whitespace.enable = true;
               treefmt.enable = true;
               typos.enable = true;
+              zig-zon-lock = {
+                enable = true;
+                name = "build.zig.zon2json-lock up to date";
+                description = "Fails if build.zig.zon2json-lock is stale relative to build.zig.zon.";
+                files = "^build\\.zig\\.zon$";
+                pass_filenames = false;
+                entry = self'.apps.check-zig-zon-lock.program;
+              };
             };
           };
 
@@ -99,6 +118,7 @@
             programs = {
               nixfmt.enable = true;
               prettier.enable = true;
+              zig.enable = true;
             };
           };
 
@@ -108,7 +128,9 @@
               config.pre-commit.devShell
               config.treefmt.build.devShell
             ];
-            packages = config.pre-commit.settings.enabledPackages;
+            packages = config.pre-commit.settings.enabledPackages ++ [
+              env.zig2nix # `zon2json`, `zon2json-lock`, `zon2nix`
+            ];
           };
         };
     };

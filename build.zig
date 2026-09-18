@@ -4,6 +4,8 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const markz_dep = b.dependency("markz", .{ .target = target, .optimize = optimize });
+
     const exe = b.addExecutable(.{
         .name = "semantic-clause-break",
         .root_module = b.createModule(.{
@@ -12,6 +14,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    exe.root_module.addImport("markz", markz_dep.module("markz"));
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -30,6 +33,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    unit_tests.root_module.addImport("markz", markz_dep.module("markz"));
     const run_unit_tests = b.addRunArtifact(unit_tests);
 
     const test_step = b.step("test", "Run unit tests");
