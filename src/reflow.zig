@@ -34,7 +34,7 @@ pub fn analyze(allocator: std.mem.Allocator, doc: *const markz.Document) !Analyz
     defer events_buf.deinit(allocator);
     var cursor: usize = 0;
 
-    try walkBlock(allocator, doc, doc.root, &cursor, &insertions, &events_buf);
+    try walkBlock(allocator, doc, doc.root, &cursor, &insertions, &events_buf, true);
 
     return .{ .insertions = try insertions.toOwnedSlice(allocator) };
 }
@@ -67,17 +67,22 @@ fn walkBlock(
     cursor: *usize,
     insertions: *std.ArrayListUnmanaged(Insertion),
     events_buf: *std.ArrayListUnmanaged(markz.Event),
+    at_top_level: bool,
 ) !void {
     switch (node.tag) {
         .paragraph => {
             events_buf.clearRetainingCapacity();
             try collectParagraphEvents(allocator, node, events_buf);
-            try processParagraph(allocator, doc, events_buf.items, cursor, insertions);
+            try processParagraph(allocator, doc, events_buf.items, cursor, insertions, at_top_level);
         },
         .document, .block_quote, .list, .list_item => {
+            // Once nested in a block quote or list, a paragraph's true line
+            // prefix (the quote marker or list continuation indent) can't
+            // be assumed empty, unlike top-level content.
+            const child_at_top_level = at_top_level and node.tag == .document;
             var child = node.first_child;
             while (child) |c| {
-                try walkBlock(allocator, doc, c, cursor, insertions, events_buf);
+                try walkBlock(allocator, doc, c, cursor, insertions, events_buf, child_at_top_level);
                 child = c.next;
             }
         },
@@ -120,19 +125,36 @@ fn processParagraph(
     events: []const markz.Event,
     cursor: *usize,
     insertions: *std.ArrayListUnmanaged(Insertion),
+    at_top_level: bool,
 ) !void {
-    var line_prefix: ?[]const u8 = null;
+    // At the top level a paragraph has no container marker, so the prefix
+    // is always known to be empty; only block-quote/list nesting requires
+    // recovering it from where the line's first node actually sits.
+    const empty_prefix: ?[]const u8 = if (at_top_level) "" else null;
+    var line_prefix: ?[]const u8 = empty_prefix;
+    // True once inline markup (emphasis/strong/link/code-span delimiters,
+    // etc.) has been seen on the current logical line. A text node reached
+    // while this is set does not sit at the true start of the line, so its
+    // position can't be used to recover a container prefix (e.g. the
+    // opening backtick of a leading code span would otherwise be mistaken
+    // for line content and get "repeated" on inserted lines).
+    var seen_markup_since_break = false;
     var boundaries: std.ArrayListUnmanaged(clauses.Boundary) = .empty;
     defer boundaries.deinit(allocator);
 
     for (events, 0..) |event, idx| {
         const node = switch (event) {
+            .enter => |n| {
+                if (n.tag != .paragraph) seen_markup_since_break = true;
+                continue;
+            },
+            .exit => continue,
             .leaf => |n| n,
-            else => continue,
         };
 
         if (node.tag == .soft_break or node.tag == .hard_break) {
-            line_prefix = null;
+            line_prefix = empty_prefix;
+            seen_markup_since_break = false;
             continue;
         }
 
@@ -149,16 +171,21 @@ fn processParagraph(
         const real_start = cursor.* + found;
         cursor.* = real_start + text.len;
 
-        if (line_prefix == null) {
+        if (line_prefix == null and node.tag == .text and !seen_markup_since_break) {
             const line_start = if (std.mem.lastIndexOfScalar(u8, doc.source[0..real_start], '\n')) |p| p + 1 else 0;
             const raw_prefix = doc.source[line_start..real_start];
             line_prefix = try continuationPrefix(allocator, raw_prefix);
         }
+        // Only the very first content-bearing node of a line can be used to
+        // recover its prefix; anything after it (of any tag) no longer sits
+        // at the true start of the line.
+        seen_markup_since_break = true;
 
         if (node.tag != .text) continue;
 
         boundaries.clearRetainingCapacity();
         try clauses.findBoundaries(allocator, text, &boundaries);
+        if (line_prefix == null) continue;
         for (boundaries.items) |b| {
             const has_more_after = if (b.end < text.len) true else hasMoreContentAfter(events, idx);
             if (!has_more_after) continue;
@@ -258,5 +285,24 @@ test "heading and code block are left untouched" {
 
 test "does not split a table" {
     const source = "| A | B |\n|---|---|\n| one, but two | x |\n";
+    try expectFixed(source, source);
+}
+
+test "paragraph starting with a code span does not leak its backtick into the prefix" {
+    try expectFixed(
+        "`code` here is a sentence. And another sentence follows.",
+        "`code` here is a sentence.\nAnd another sentence follows.",
+    );
+}
+
+test "paragraph starting with emphasis does not leak its marker into the prefix" {
+    try expectFixed(
+        "*emphasis* here is a sentence. And another sentence follows.",
+        "*emphasis* here is a sentence.\nAnd another sentence follows.",
+    );
+}
+
+test "list item paragraph starting with a code span is left alone rather than guessed at" {
+    const source = "- `code` here is a sentence. And another sentence follows.";
     try expectFixed(source, source);
 }
