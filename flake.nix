@@ -58,6 +58,12 @@
             );
           };
 
+          apps.check-markdown-clause-break = {
+            type = "app";
+            meta.description = "Check that markdown files are split at independent clauses.";
+            program = pkgs.lib.getExe' self'.packages.default "semantic-clause-break";
+          };
+
           packages = rec {
             foreign = env.package {
               # binary to be shipped outside of Nix
@@ -107,6 +113,14 @@
                 files = "^build\\.zig\\.zon$";
                 pass_filenames = false;
                 entry = self'.apps.check-zig-zon-lock.program;
+              };
+              markdown-clause-break = {
+                enable = true;
+                name = "markdown files split at independent clauses";
+                description = "Fails if any markdown file has un-split independent clauses (auto-fixed in place).";
+                files = "\\.md$";
+                pass_filenames = true;
+                entry = "${self'.apps.check-markdown-clause-break.program} --fix";
               };
             };
           };
