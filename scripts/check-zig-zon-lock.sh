@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [ -n "${NIX_BUILD_TOP:-}" ]; then
+  # Running inside a sandboxed Nix build (e.g. `nix flake check`'s
+  # pre-commit derivation), which has no network access and thus cannot
+  # fetch the Git dependency needed to verify the lock file.
+  echo 'No network access in sandboxed Nix build - skipping zon2lock check.'
+  exit 0
+fi
+
 before="$(mktemp)"
 trap 'rm -f "$before"' EXIT
 
