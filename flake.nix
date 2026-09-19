@@ -99,6 +99,7 @@
             check.enable = true;
             settings.package = pkgs.prek;
             settings.hooks = {
+              actionlint.enable = true;
               editorconfig-checker.enable = true;
               end-of-file-fixer.enable = true;
               checkmake.enable = true;

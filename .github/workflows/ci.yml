@@ -1,0 +1,50 @@
+# yaml-language-server: $schema=https://www.schemastore.org/github-action.json
+---
+name: Continuous Integration
+on:
+  pull_request:
+    branches:
+      - main
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  nix-build:
+    name: nix build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        package:
+          - foreign
+          - default
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Configure cachix binary cache
+        uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
+        with:
+          name: lafrenierejm
+      - name: build
+        env:
+          PACKAGE: ${{ matrix.package }}
+        run: nix build --print-build-logs ".#${PACKAGE}"
+  nix-flake-check:
+    name: nix flake check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Configure cachix binary cache
+        uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
+        with:
+          name: lafrenierejm
+      - name: check
+        run: nix flake check
