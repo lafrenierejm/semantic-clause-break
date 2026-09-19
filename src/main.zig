@@ -38,6 +38,38 @@ fn printUsage() void {
     }
 }
 
+const FileOutcome = union(enum) {
+    err: anyerror,
+    checked: usize,
+    fixed: bool,
+};
+
+fn processFile(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    cwd: std.Io.Dir,
+    path: []const u8,
+    fix: bool,
+    max_file_size: std.Io.Limit,
+) FileOutcome {
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const source = cwd.readFileAlloc(io, path, arena, max_file_size) catch |err| return .{ .err = err };
+    var doc = markz.parseWith(arena, source, .{ .gfm = true }) catch |err| return .{ .err = err };
+    const result = reflow.analyze(arena, &doc) catch |err| return .{ .err = err };
+
+    if (fix) {
+        if (result.insertions.len == 0) return .{ .fixed = false };
+        const fixed = reflow.applyInsertions(arena, source, result.insertions) catch |err| return .{ .err = err };
+        cwd.writeFile(io, .{ .sub_path = path, .data = fixed }) catch |err| return .{ .err = err };
+        return .{ .fixed = true };
+    }
+
+    return .{ .checked = result.insertions.len };
+}
+
 pub fn main(init: std.process.Init) !u8 {
     const gpa = init.gpa;
     const io = init.io;
@@ -82,32 +114,32 @@ pub fn main(init: std.process.Init) !u8 {
     };
 
     const cwd = std.Io.Dir.cwd();
+    const file_size_limit = std.Io.Limit.limited(max_file_size);
     var any_errors = false;
     var any_changed = false;
 
-    for (paths.items) |path| {
-        var arena_state = std.heap.ArenaAllocator.init(gpa);
-        defer arena_state.deinit();
-        const arena = arena_state.allocator();
+    const futures = try gpa.alloc(std.Io.Future(FileOutcome), paths.items.len);
+    defer gpa.free(futures);
 
-        const source = cwd.readFileAlloc(io, path, arena, std.Io.Limit.limited(max_file_size)) catch |err| {
-            std.debug.print("{s}: {t}\n", .{ path, err });
-            any_errors = true;
-            continue;
-        };
+    // Each file is read, parsed, and analyzed independently, so let the Io
+    // implementation overlap their I/O instead of processing sequentially.
+    for (paths.items, futures) |path, *future| {
+        future.* = std.Io.async(io, processFile, .{ io, gpa, cwd, path, fix, file_size_limit });
+    }
 
-        var doc = try markz.parseWith(arena, source, .{ .gfm = true });
-        const result = try reflow.analyze(arena, &doc);
-
-        if (fix) {
-            if (result.insertions.len > 0) {
-                const fixed = try reflow.applyInsertions(arena, source, result.insertions);
-                try cwd.writeFile(io, .{ .sub_path = path, .data = fixed });
-                any_changed = true;
-            }
-        } else {
-            std.debug.print("{s}: {d} error(s)\n", .{ path, result.insertions.len });
-            if (result.insertions.len > 0) any_errors = true;
+    for (paths.items, futures) |path, *future| {
+        switch (future.await(io)) {
+            .err => |err| {
+                std.debug.print("{s}: {t}\n", .{ path, err });
+                any_errors = true;
+            },
+            .checked => |error_count| {
+                std.debug.print("{s}: {d} error(s)\n", .{ path, error_count });
+                if (error_count > 0) any_errors = true;
+            },
+            .fixed => |changed| {
+                if (changed) any_changed = true;
+            },
         }
     }
 
