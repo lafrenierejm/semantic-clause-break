@@ -7,28 +7,277 @@ pub const Boundary = struct {
     end: usize,
 };
 
+// All abbreviations are copied from pySBD under terms of its MIT license.
+// https://github.com/nipunsadvilkar/pySBD/blob/5905f13be4fc95f407b98392e0ec303617a33d86/pysbd/lang/common/standard.py#L26-L28
+//
+// The general list: a trailing period after any of these is always treated
+// as part of the abbreviation, never a sentence end.
 const abbreviations = [_][]const u8{
+    "adj",
+    "adm",
+    "adv",
+    "al",
+    "ala",
+    "alta",
+    "apr",
+    "arc",
+    "ariz",
+    "ark",
+    "art",
+    "assn",
+    "asst",
+    "attys",
+    "aug",
+    "ave",
+    "bart",
+    "bld",
+    "bldg",
+    "blvd",
+    "brig",
+    "bros",
+    "btw",
+    "cal",
+    "calif",
+    "capt",
+    "cl",
+    "cmdr",
+    "co",
+    "col",
+    "colo",
+    "comdr",
+    "con",
+    "conn",
+    "corp",
+    "cpl",
+    "cres",
+    "ct",
+    "d.phil",
+    "dak",
+    "dec",
+    "del",
+    "dept",
+    "det",
+    "dist",
     "dr",
-    "eg",
-    "ie",
+    "dr.phil",
+    "dr.philos",
+    "drs",
+    "e.g",
+    "ens",
+    "esp",
+    "esq",
+    "etc",
+    "exp",
+    "expy",
+    "ext",
+    "feb",
+    "fed",
+    "fla",
+    "ft",
+    "fwy",
+    "fy",
+    "ga",
+    "gen",
+    "gov",
+    "hon",
+    "hosp",
+    "hr",
+    "hway",
+    "hwy",
+    "i.e",
+    "ia",
+    "id",
+    "ida",
+    "ill",
+    "inc",
+    "ind",
+    "ing",
+    "insp",
+    "is",
+    "jan",
     "jr",
+    "jul",
+    "jun",
+    "kan",
+    "kans",
+    "ken",
+    "ky",
+    "la",
+    "lt",
+    "ltd",
+    "maj",
+    "man",
+    "mar",
+    "mass",
+    "may",
+    "md",
+    "me",
+    "med",
+    "messrs",
+    "mex",
+    "mfg",
+    "mich",
+    "min",
+    "minn",
+    "miss",
+    "mlle",
+    "mm",
+    "mme",
+    "mo",
+    "mont",
     "mr",
     "mrs",
     "ms",
+    "msgr",
+    "mssrs",
+    "mt",
+    "mtn",
+    "neb",
+    "nebr",
+    "nev",
+    "no",
+    "nos",
+    "nov",
+    "nr",
+    "oct",
+    "ok",
+    "okla",
+    "ont",
+    "op",
+    "ord",
+    "ore",
+    "p",
+    "pa",
+    "pd",
+    "pde",
+    "penn",
+    "penna",
+    "pfc",
+    "ph",
+    "ph.d",
+    "pl",
+    "plz",
+    "pp",
     "prof",
+    "pvt",
+    "que",
+    "rd",
+    "rs",
+    "ref",
+    "rep",
+    "reps",
+    "res",
+    "rev",
+    "rt",
+    "sask",
+    "sec",
+    "sen",
+    "sens",
+    "sep",
+    "sept",
+    "sfc",
+    "sgt",
     "sr",
+    "st",
+    "supt",
+    "surg",
+    "tce",
+    "tenn",
+    "tex",
+    "univ",
+    "usafa",
+    "u.s",
+    "ut",
+    "va",
+    "v",
+    "ver",
+    "viz",
     "vs",
+    "vt",
+    "wash",
+    "wis",
+    "wisc",
+    "wy",
+    "wyo",
+    "yuk",
+    "fig",
+};
+// Titles that always precede a name ("Mr.", "Gen.", "Dr.", ...), so a
+// following capitalized word never signals a new sentence. Currently a
+// subset of `abbreviations`; kept separate so the two lists can diverge and
+// so this list's entries are exempt from the digit requirement below.
+const prepositive_abbreviations = [_][]const u8{
+    "adm",
+    "attys",
+    "brig",
+    "capt",
+    "cmdr",
+    "col",
+    "cpl",
+    "det",
+    "dr",
+    "gen",
+    "gov",
+    "ing",
+    "lt",
+    "maj",
+    "mr",
+    "mrs",
+    "ms",
+    "mt",
+    "messrs",
+    "mssrs",
+    "prof",
+    "ph",
+    "rep",
+    "reps",
+    "rev",
+    "sen",
+    "sens",
+    "sgt",
+    "st",
+    "supt",
+    "v",
+    "vs",
+    "fig",
+};
+// Short tokens ("no", "p", "art", ...) that are too common as ordinary
+// words or sentence-final abbreviations to suppress unconditionally; a
+// trailing period only counts as part of the abbreviation when a number
+// follows (e.g. "No. 5"), so this list is checked separately from, and
+// takes priority over, `abbreviations`.
+const number_abbreviations = [_][]const u8{
+    "art",
+    "ext",
+    "no",
+    "nos",
+    "p",
+    "pp",
 };
 
 fn isAlnum(c: u8) bool {
     return std.ascii.isAlphanumeric(c);
 }
 
+fn listContains(list: []const []const u8, word: []const u8) bool {
+    for (list) |entry| {
+        if (std.mem.eql(u8, word, entry)) return true;
+    }
+    return false;
+}
+
 /// Walk backward from `end` (exclusive) collecting a run of ASCII letters and
-/// interior '.' characters, then check it against a small abbreviation list
-/// (dots stripped, case-insensitive). Used to suppress false sentence breaks
-/// like "Dr. Smith".
-fn endsWithAbbreviation(text: []const u8, end: usize) bool {
+/// interior '.' characters (e.g. "e.g" or "U.S"), lowercase it, and check it
+/// against the abbreviation lists (case-insensitive). `followed_by_number`
+/// is whether a digit (skipping spaces) follows the punctuation at `end`.
+///
+/// `number_abbreviations` holds short, otherwise-ambiguous tokens ("no",
+/// "p", "art", ...) that only reliably indicate an abbreviation when a
+/// number follows (e.g. "No. 5"); on their own they're too common as
+/// ordinary words to blanket-suppress. `abbreviations` and
+/// `prepositive_abbreviations` (titles that always precede a name, like
+/// "Mr.", "Gen.") are suppressed unconditionally.
+fn endsWithAbbreviation(text: []const u8, end: usize, followed_by_number: bool) bool {
     var start = end;
     while (start > 0) {
         const c = text[start - 1];
@@ -43,16 +292,14 @@ fn endsWithAbbreviation(text: []const u8, end: usize) bool {
     var buf: [16]u8 = undefined;
     var len: usize = 0;
     for (text[start..end]) |c| {
-        if (c == '.') continue;
         if (len >= buf.len) return false;
         buf[len] = std.ascii.toLower(c);
         len += 1;
     }
     const word = buf[0..len];
-    for (abbreviations) |abbr| {
-        if (std.mem.eql(u8, word, abbr)) return true;
-    }
-    return false;
+
+    if (listContains(&number_abbreviations, word)) return followed_by_number;
+    return listContains(&abbreviations, word) or listContains(&prepositive_abbreviations, word);
 }
 
 /// Skip closing quote/paren characters that commonly trail sentence-ending
@@ -85,7 +332,12 @@ pub fn findBoundaries(allocator: std.mem.Allocator, text: []const u8, out: *std.
         const c = text[i];
         switch (c) {
             '.', '!', '?' => {
-                if (endsWithAbbreviation(text, i)) {
+                const followed_by_number = blk: {
+                    var j = i + 1;
+                    while (j < text.len and text[j] == ' ') : (j += 1) {}
+                    break :blk j < text.len and std.ascii.isDigit(text[j]);
+                };
+                if (endsWithAbbreviation(text, i, followed_by_number)) {
                     i += 1;
                     continue;
                 }
@@ -162,6 +414,18 @@ test "abbreviation does not split" {
 
 test "e.g. does not split" {
     try expectBoundaries("Bring snacks, e.g. chips.", &.{});
+}
+
+test "prepositive abbreviation does not split" {
+    try expectBoundaries("Gen. Smith arrived.", &.{});
+}
+
+test "number abbreviation only suppresses when followed by a number" {
+    try expectBoundaries("See p. 5 for details.", &.{});
+    try expectBoundaries(
+        "This ends on p. Nothing follows.",
+        &.{.{ .start = 15, .end = 16 }},
+    );
 }
 
 test "decimal number does not split" {
