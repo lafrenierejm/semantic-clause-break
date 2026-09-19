@@ -95,6 +95,12 @@
             });
           };
 
+          checks = {
+            zig-tests = self'.packages.default.overrideAttrs (_: {
+              doCheck = true;
+            });
+          };
+
           pre-commit = {
             check.enable = true;
             settings.package = pkgs.prek;
