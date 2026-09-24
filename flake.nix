@@ -112,6 +112,7 @@
               trim-trailing-whitespace.enable = true;
               treefmt.enable = true;
               typos.enable = true;
+              zizmor.enable = true;
               zig-zon-lock = {
                 enable = true;
                 name = "build.zig.zon2json-lock up to date";
