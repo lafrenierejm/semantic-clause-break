@@ -255,10 +255,6 @@ const number_abbreviations = [_][]const u8{
     "pp",
 };
 
-fn isAlnum(c: u8) bool {
-    return std.ascii.isAlphanumeric(c);
-}
-
 fn listContains(list: []const []const u8, word: []const u8) bool {
     for (list) |entry| {
         if (std.mem.eql(u8, word, entry)) return true;
@@ -281,7 +277,7 @@ fn endsWithAbbreviation(text: []const u8, end: usize, followed_by_number: bool) 
     var start = end;
     while (start > 0) {
         const c = text[start - 1];
-        if (isAlnum(c) or c == '.') {
+        if (std.ascii.isAlphanumeric(c) or c == '.') {
             start -= 1;
         } else {
             break;
