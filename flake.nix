@@ -106,6 +106,7 @@
             settings.package = pkgs.prek;
             settings.hooks = {
               actionlint.enable = true;
+              convco.enable = true;
               editorconfig-checker.enable = true;
               end-of-file-fixer.enable = true;
               ripsecrets.enable = true;
