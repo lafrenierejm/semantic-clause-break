@@ -264,16 +264,16 @@ fn listContains(list: []const []const u8, word: []const u8) bool {
 
 /// Walk backward from `end` (exclusive) collecting a run of ASCII letters and
 /// interior '.' characters (e.g. "e.g" or "U.S"), lowercase it, and check it
-/// against the abbreviation lists (case-insensitive). `followed_by_number`
-/// is whether a digit (skipping spaces) follows the punctuation at `end`.
+/// against the abbreviation lists (case-insensitive). `next` is the first
+/// non-space byte after the punctuation at `end`, if any.
 ///
-/// `number_abbreviations` holds short, otherwise-ambiguous tokens ("no",
-/// "p", "art", ...) that only reliably indicate an abbreviation when a
-/// number follows (e.g. "No. 5"); on their own they're too common as
-/// ordinary words to blanket-suppress. `abbreviations` and
-/// `prepositive_abbreviations` (titles that always precede a name, like
-/// "Mr.", "Gen.") are suppressed unconditionally.
-fn endsWithAbbreviation(text: []const u8, end: usize, followed_by_number: bool) bool {
+/// `number_abbreviations` ("no", "p", "art", ...) only count when a number
+/// follows (e.g. "No. 5"). `prepositive_abbreviations` (titles like "Mr.",
+/// "Gen.") and dotted abbreviations ("e.g.", "U.S.") always count. Other
+/// `abbreviations` include ordinary words ("is", "me", "may"), so, as in
+/// pySBD, they only count when the next word doesn't look like a new
+/// sentence: a lowercase letter, digit, or '(' follows, or nothing does.
+fn endsWithAbbreviation(text: []const u8, end: usize, next: ?u8) bool {
     var start = end;
     while (start > 0) {
         const c = text[start - 1];
@@ -294,8 +294,14 @@ fn endsWithAbbreviation(text: []const u8, end: usize, followed_by_number: bool) 
     }
     const word = buf[0..len];
 
-    if (listContains(&number_abbreviations, word)) return followed_by_number;
-    return listContains(&abbreviations, word) or listContains(&prepositive_abbreviations, word);
+    if (listContains(&number_abbreviations, word)) {
+        return if (next) |n| std.ascii.isDigit(n) else false;
+    }
+    if (listContains(&prepositive_abbreviations, word)) return true;
+    if (!listContains(&abbreviations, word)) return false;
+    if (std.mem.indexOfScalar(u8, word, '.') != null) return true;
+    const n = next orelse return true;
+    return std.ascii.isLower(n) or std.ascii.isDigit(n) or n == '(';
 }
 
 /// Skip closing quote/paren characters that commonly trail sentence-ending
@@ -328,12 +334,12 @@ pub fn findBoundaries(allocator: std.mem.Allocator, text: []const u8, out: *std.
         const c = text[i];
         switch (c) {
             '.', '!', '?' => {
-                const followed_by_number = blk: {
+                const next: ?u8 = blk: {
                     var j = i + 1;
                     while (j < text.len and text[j] == ' ') : (j += 1) {}
-                    break :blk j < text.len and std.ascii.isDigit(text[j]);
+                    break :blk if (j < text.len) text[j] else null;
                 };
-                if (endsWithAbbreviation(text, i, followed_by_number)) {
+                if (endsWithAbbreviation(text, i, next)) {
                     i += 1;
                     continue;
                 }
@@ -430,6 +436,11 @@ test "decimal number does not split" {
 
 test "quoted sentence end splits" {
     try expectBoundaries("He said \"stop.\" Then left.", &.{.{ .start = 15, .end = 16 }});
+}
+
+test "common word in the abbreviation list still ends a sentence before a capitalized word" {
+    try expectBoundaries("It is what it is. Next sentence.", &.{.{ .start = 17, .end = 18 }});
+    try expectBoundaries("Give it to me. Then leave.", &.{.{ .start = 14, .end = 15 }});
 }
 
 test "multiple boundaries" {
