@@ -34,7 +34,7 @@ pub fn analyze(allocator: std.mem.Allocator, doc: *const markz.Document) !Analyz
     defer events_buf.deinit(allocator);
     var cursor: usize = 0;
 
-    try walkBlock(allocator, doc, doc.root, &cursor, &insertions, &events_buf, true);
+    try walkBlock(allocator, doc, doc.root, &cursor, &insertions, &events_buf, true, true);
 
     return .{ .insertions = try insertions.toOwnedSlice(allocator) };
 }
@@ -60,6 +60,10 @@ pub fn applyInsertions(allocator: std.mem.Allocator, source: []const u8, inserti
 /// Only descend into containers that can hold prose (document, block
 /// quotes, lists, list items). Headings, code blocks, HTML blocks, tables,
 /// and thematic breaks are left untouched, per the tool's scope.
+///
+/// `spans_are_offsets` is false inside list items. markz re-parses list items'
+/// contents from a marker-stripped copy, so descendant spans are relative to
+/// that copy rather than to `doc.source`.
 fn walkBlock(
     allocator: std.mem.Allocator,
     doc: *const markz.Document,
@@ -68,6 +72,7 @@ fn walkBlock(
     insertions: *std.ArrayListUnmanaged(Insertion),
     events_buf: *std.ArrayListUnmanaged(markz.Event),
     at_top_level: bool,
+    spans_are_offsets: bool,
 ) !void {
     switch (node.tag) {
         .paragraph => {
@@ -80,13 +85,17 @@ fn walkBlock(
             // prefix (the quote marker or list continuation indent) can't
             // be assumed empty, unlike top-level content.
             const child_at_top_level = at_top_level and node.tag == .document;
+            const child_spans_are_offsets = spans_are_offsets and node.tag != .list_item;
             var child = node.first_child;
             while (child) |c| {
-                try walkBlock(allocator, doc, c, cursor, insertions, events_buf, child_at_top_level);
+                try walkBlock(allocator, doc, c, cursor, insertions, events_buf, child_at_top_level, child_spans_are_offsets);
                 child = c.next;
             }
         },
-        else => {},
+        // Move the search cursor past skipped blocks.
+        else => if (spans_are_offsets) {
+            cursor.* = @max(cursor.*, node.source.end);
+        },
     }
 }
 
@@ -305,4 +314,18 @@ test "paragraph starting with emphasis does not leak its marker into the prefix"
 test "list item paragraph starting with a code span is left alone rather than guessed at" {
     const source = "- `code` here is a sentence. And another sentence follows.";
     try expectFixed(source, source);
+}
+
+test "paragraph text duplicated in a preceding heading splits the paragraph, not the heading" {
+    try expectFixed(
+        "# Hi. There\n\nHi. There\n",
+        "# Hi. There\n\nHi.\nThere\n",
+    );
+}
+
+test "paragraph text duplicated in a preceding code block splits the paragraph, not the code" {
+    try expectFixed(
+        "```\nA. B\n```\n\nA. B\n",
+        "```\nA. B\n```\n\nA.\nB\n",
+    );
 }
