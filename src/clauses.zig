@@ -308,16 +308,17 @@ fn endsWithAbbreviation(text: []const u8, end: usize, next: ?u8) bool {
 /// punctuation, e.g. `He said "stop." Then left.`
 fn skipClosers(text: []const u8, pos: usize) usize {
     var i = pos;
-    while (i < text.len) : (i += 1) {
+    while (i < text.len) {
         switch (text[i]) {
-            '"', '\'', ')', ']', 0xe2 => {
-                // 0xe2 covers the lead byte of UTF-8 smart quotes (e.g. ” ’);
-                // treat any of the three-byte sequence as a single closer.
-                if (text[i] == 0xe2) {
-                    if (i + 2 < text.len) i += 2 else return i;
-                }
+            '"', '\'', ')', ']' => i += 1,
+            else => {
+                const rest = text[i..];
+                const right_double_quote = std.mem.startsWith(u8, rest, "\u{201D}"); // ”
+                const right_single_quote = std.mem.startsWith(u8, rest, "\u{2019}"); // ’
+                if (right_double_quote or right_single_quote) {
+                    i += 3;
+                } else return i;
             },
-            else => return i,
         }
     }
     return i;
@@ -441,6 +442,15 @@ test "quoted sentence end splits" {
 test "common word in the abbreviation list still ends a sentence before a capitalized word" {
     try expectBoundaries("It is what it is. Next sentence.", &.{.{ .start = 17, .end = 18 }});
     try expectBoundaries("Give it to me. Then leave.", &.{.{ .start = 14, .end = 15 }});
+}
+
+test "em dash and ellipsis after a period are not treated as closing quotes" {
+    try expectBoundaries("Wait.\u{2014} then go.", &.{});
+    try expectBoundaries("Wait.\u{2026} then go.", &.{});
+}
+
+test "smart closing quote after sentence end splits" {
+    try expectBoundaries("He said \u{201C}stop.\u{201D} Then left.", &.{.{ .start = 19, .end = 20 }});
 }
 
 test "multiple boundaries" {
