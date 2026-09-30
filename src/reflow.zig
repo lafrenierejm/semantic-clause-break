@@ -208,37 +208,30 @@ fn processParagraph(
 }
 
 /// Convert a captured line prefix into the form new continuation lines
-/// should use: block-quote markers ("> ") repeat verbatim, but a list
+/// should use. Block-quote markers ("> ") repeat verbatim, but every list
 /// marker (bullet or ordinal) becomes equal-width spaces so a mid-item
 /// split doesn't start a new list item.
 fn continuationPrefix(allocator: std.mem.Allocator, prefix: []const u8) ![]const u8 {
-    var end = prefix.len;
-    while (end > 0 and prefix[end - 1] == ' ') : (end -= 1) {}
-    if (end == 0) return prefix;
-
-    var start = end;
-    while (start > 0 and prefix[start - 1] != ' ') : (start -= 1) {}
-    const token = prefix[start..end];
-
-    const is_bullet = token.len == 1 and (token[0] == '-' or token[0] == '*' or token[0] == '+');
-    var is_ordinal = false;
-    if (!is_bullet and token.len >= 2) {
-        const last = token[token.len - 1];
-        if (last == '.' or last == ')') {
-            is_ordinal = true;
-            for (token[0 .. token.len - 1]) |c| {
-                if (!std.ascii.isDigit(c)) {
-                    is_ordinal = false;
-                    break;
-                }
-            }
-        }
+    var out: ?[]u8 = null;
+    var it = std.mem.tokenizeScalar(u8, prefix, ' ');
+    while (it.next()) |token| {
+        if (!isListMarker(token)) continue;
+        const buf = out orelse try allocator.dupe(u8, prefix);
+        out = buf;
+        const start = @intFromPtr(token.ptr) - @intFromPtr(prefix.ptr);
+        @memset(buf[start..][0..token.len], ' ');
     }
-    if (!is_bullet and !is_ordinal) return prefix;
+    return out orelse prefix;
+}
 
-    const out = try allocator.dupe(u8, prefix);
-    @memset(out[start..end], ' ');
-    return out;
+fn isListMarker(token: []const u8) bool {
+    if (token.len == 1) return token[0] == '-' or token[0] == '*' or token[0] == '+';
+    const last = token[token.len - 1];
+    if (last != '.' and last != ')') return false;
+    for (token[0 .. token.len - 1]) |c| {
+        if (!std.ascii.isDigit(c)) return false;
+    }
+    return true;
 }
 
 fn expectFixed(source: []const u8, expected: []const u8) !void {
@@ -327,5 +320,19 @@ test "paragraph text duplicated in a preceding code block splits the paragraph, 
     try expectFixed(
         "```\nA. B\n```\n\nA. B\n",
         "```\nA. B\n```\n\nA.\nB\n",
+    );
+}
+
+test "block quote inside a list item blanks the list marker but keeps the quote marker" {
+    try expectFixed(
+        "- > First clause. Second clause.",
+        "- > First clause.\n  > Second clause.",
+    );
+}
+
+test "nested list item blanks every list marker in the prefix" {
+    try expectFixed(
+        "1. - First clause. Second clause.",
+        "1. - First clause.\n     Second clause.",
     );
 }
