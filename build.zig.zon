@@ -8,6 +8,11 @@
             .url = "git+https://codeberg.org/nurulhudaapon/markz#690daf1bd3c734bd1fb86bf334e1c491dd59de94",
             .hash = "markz-0.1.0-53lpvE-hBgCmxKok0N8pzZ-S7Rndp7pDOP1cTvxtP49T",
         },
+        .cmark_gfm = .{
+            .url = "git+https://github.com/github/cmark-gfm#587a12bb54d95ac37241377e6ddc93ea0e45439b", // tag 0.29.0.gfm.13
+            .hash = "N-V-__8AACaGFwDmjLKFjd0jlhijuVlTuOCGoRVvp406CsLD",
+            .lazy = true, // GFM spec example `test/spec.txt` is used in tests
+        },
     },
     .paths = .{
         "LICENSE",

@@ -34,6 +34,11 @@ pub fn build(b: *std.Build) void {
         }),
     });
     unit_tests.root_module.addImport("markz", markz_dep.module("markz"));
+    if (b.lazyDependency("cmark_gfm", .{})) |cmark_gfm_dep| {
+        unit_tests.root_module.addAnonymousImport("gfm_spec", .{
+            .root_source_file = cmark_gfm_dep.path("test/spec.txt"),
+        });
+    }
     const run_unit_tests = b.addRunArtifact(unit_tests);
 
     const test_step = b.step("test", "Run unit tests");

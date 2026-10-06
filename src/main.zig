@@ -6,6 +6,7 @@ const reflow = @import("reflow.zig");
 test {
     _ = clauses;
     _ = reflow;
+    _ = @import("spec_test.zig");
 }
 
 fn expectOk(args: []const []const u8, expected: Options) !void {
