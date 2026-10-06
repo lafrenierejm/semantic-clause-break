@@ -28,15 +28,172 @@ pub const AnalyzeResult = struct {
 /// can't be found (e.g. it was decoded from an HTML entity and so no longer
 /// matches the source bytes verbatim), the rest of that paragraph is safely
 /// skipped rather than guessed at.
+///
+/// A boundary is only reported if breaking the line there leaves the
+/// rendered document unchanged; see `keepRenderPreserving`.
 pub fn analyze(allocator: std.mem.Allocator, doc: *const markz.Document) !AnalyzeResult {
-    var insertions: std.ArrayListUnmanaged(Insertion) = .empty;
+    var candidates: std.ArrayListUnmanaged(Insertion) = .empty;
+    defer candidates.deinit(allocator);
     var events_buf: std.ArrayListUnmanaged(markz.Event) = .empty;
     defer events_buf.deinit(allocator);
     var cursor: usize = 0;
 
-    try walkBlock(allocator, doc, doc.root, &cursor, &insertions, &events_buf, true, true);
+    try walkBlock(allocator, doc, doc.root, &cursor, &candidates, &events_buf, true, true);
 
-    return .{ .insertions = try insertions.toOwnedSlice(allocator) };
+    return .{ .insertions = try keepRenderPreserving(allocator, doc, candidates.items) };
+}
+
+/// Return the subset of `candidates` (sorted ascending by `at`) that can be
+/// applied together without changing how `doc` renders, ignoring
+/// differences in whitespace.
+///
+/// Breaking a line can change the document's structure: the next clause
+/// may start with block syntax (a list marker, "#", ">", a code fence, an
+/// HTML block tag), or the line left behind may become a setext underline
+/// or table delimiter row. Rather than encode every such rule, markz is
+/// asked directly, in two stages:
+///
+/// 1. Each candidate is checked locally (see `continuesParagraph`): the
+///    common case of a split starting a new block is rejected without
+///    rendering the whole document, which would make a large file with many
+///    such candidates quadratic.
+/// 2. Effects aren't always local (e.g. a line left behind becoming a table
+///    delimiter row), so the survivors are applied together and the whole
+///    document is re-rendered and compared. That normally costs one render.
+///    If it fails, candidates are accepted greedily in document order and a
+///    range that fails is bisected, so each unsafe candidate costs O(log n)
+///    more renders.
+///
+/// A candidate that's unsafe alone can become safe once a later one is
+/// accepted (e.g. breaking before "1. foo" starts a list, but not once
+/// "1." is also broken off, since an empty list item can't interrupt a
+/// paragraph). Rejected candidates are retried until a round accepts none,
+/// so the result is the same as running the fixer on its own output.
+fn keepRenderPreserving(allocator: std.mem.Allocator, doc: *const markz.Document, candidates: []const Insertion) ![]Insertion {
+    if (candidates.len == 0) return allocator.alloc(Insertion, 0);
+
+    const original = try markz.renderHtml(allocator, doc);
+    defer allocator.free(original);
+
+    var check: RenderCheck = .{
+        .scratch = std.heap.ArenaAllocator.init(allocator),
+        .source = doc.source,
+        .original = original,
+        .candidates = candidates,
+        .keep = try allocator.alloc(bool, candidates.len),
+        .trial = .empty,
+    };
+    defer check.scratch.deinit();
+    defer allocator.free(check.keep);
+    defer check.trial.deinit(allocator);
+    @memset(check.keep, false);
+
+    var pending: std.ArrayListUnmanaged(usize) = .empty;
+    defer pending.deinit(allocator);
+    for (candidates, 0..) |c, i| {
+        // The new line runs to the next candidate (assumed accepted too) or
+        // to the end of the current line.
+        const start = c.at + c.len;
+        const line_end = std.mem.indexOfScalarPos(u8, doc.source, start, '\n') orelse doc.source.len;
+        const end = if (i + 1 < candidates.len) @min(candidates[i + 1].at, line_end) else line_end;
+        if (try continuesParagraph(&check.scratch, doc.source[start..end])) try pending.append(allocator, i);
+    }
+
+    while (pending.items.len > 0) {
+        try check.acceptRange(allocator, pending.items);
+        const before = pending.items.len;
+        var write: usize = 0;
+        for (pending.items) |i| {
+            if (check.keep[i]) continue;
+            pending.items[write] = i;
+            write += 1;
+        }
+        pending.shrinkRetainingCapacity(write);
+        if (write == before) break;
+    }
+
+    var accepted: std.ArrayListUnmanaged(Insertion) = .empty;
+    defer accepted.deinit(allocator);
+    for (candidates, check.keep) |c, keep| {
+        if (keep) try accepted.append(allocator, c);
+    }
+    return accepted.toOwnedSlice(allocator);
+}
+
+const RenderCheck = struct {
+    scratch: std.heap.ArenaAllocator,
+    source: []const u8,
+    original: []const u8,
+    candidates: []const Insertion,
+    /// Which candidates are accepted so far.
+    keep: []bool,
+    /// Reused buffer for the candidates under trial.
+    trial: std.ArrayListUnmanaged(Insertion),
+
+    /// Accept `range` (indices into `candidates`) if applying it alongside
+    /// everything already accepted renders the same; otherwise bisect it.
+    fn acceptRange(self: *RenderCheck, allocator: std.mem.Allocator, range: []const usize) !void {
+        for (range) |i| self.keep[i] = true;
+        if (try self.rendersSame(allocator)) return;
+        for (range) |i| self.keep[i] = false;
+
+        if (range.len == 1) return;
+        const mid = range.len / 2;
+        try self.acceptRange(allocator, range[0..mid]);
+        try self.acceptRange(allocator, range[mid..]);
+    }
+
+    fn rendersSame(self: *RenderCheck, allocator: std.mem.Allocator) !bool {
+        self.trial.clearRetainingCapacity();
+        for (self.candidates, self.keep) |c, keep| {
+            if (keep) try self.trial.append(allocator, c);
+        }
+
+        defer _ = self.scratch.reset(.retain_capacity);
+        const arena = self.scratch.allocator();
+        const fixed = try applyInsertions(arena, self.source, self.trial.items);
+        var doc = try markz.parseWith(arena, fixed, .{ .gfm = true });
+        const html = try markz.renderHtml(arena, &doc);
+        return eqlCollapsingWhitespace(self.original, html);
+    }
+};
+
+/// True if `line`, placed on the line after a paragraph's first line, is
+/// still part of that paragraph rather than starting a new block (or turning
+/// the paragraph into something else, like a setext heading or table).
+fn continuesParagraph(scratch: *std.heap.ArenaAllocator, line: []const u8) !bool {
+    defer _ = scratch.reset(.retain_capacity);
+    const arena = scratch.allocator();
+    const probe = try std.mem.concat(arena, u8, &.{ "p\n", line });
+    const doc = try markz.parseWith(arena, probe, .{ .gfm = true });
+    const first = doc.root.first_child orelse return false;
+    return first.tag == .paragraph and first.next == null;
+}
+
+/// Compare `a` and `b`, treating every run of spaces, tabs, and newlines as
+/// a single space. A soft line break renders as a newline where the
+/// original rendered a space, and HTML treats the two the same.
+fn eqlCollapsingWhitespace(a: []const u8, b: []const u8) bool {
+    var i: usize = 0;
+    var j: usize = 0;
+    while (true) {
+        const a_space = i < a.len and isHtmlSpace(a[i]);
+        const b_space = j < b.len and isHtmlSpace(b[j]);
+        if (a_space != b_space) return false;
+        if (a_space) {
+            while (i < a.len and isHtmlSpace(a[i])) i += 1;
+            while (j < b.len and isHtmlSpace(b[j])) j += 1;
+            continue;
+        }
+        if (i == a.len or j == b.len) return i == a.len and j == b.len;
+        if (a[i] != b[j]) return false;
+        i += 1;
+        j += 1;
+    }
+}
+
+fn isHtmlSpace(c: u8) bool {
+    return c == ' ' or c == '\t' or c == '\n';
 }
 
 /// Apply `insertions` (must be sorted ascending by `at`) to `source`,
@@ -334,5 +491,32 @@ test "nested list item blanks every list marker in the prefix" {
     try expectFixed(
         "1. - First clause. Second clause.",
         "1. - First clause.\n     Second clause.",
+    );
+}
+
+test "does not split where the next clause would start a heading" {
+    const source = "See below. # Not a heading";
+    try expectFixed(source, source);
+}
+
+test "does not split where the next clause would start a list" {
+    const source = "Steps follow. - Open the file";
+    try expectFixed(source, source);
+}
+
+test "does not split where the line left behind would underline a setext heading" {
+    const source = "First clause. Second clause.\nThird clause. ---";
+    try expectFixed(source, "First clause.\nSecond clause.\nThird clause. ---");
+}
+
+test "does not split where the next clause would open a code fence" {
+    const source = "Run this. ``` code";
+    try expectFixed(source, source);
+}
+
+test "keeps safe splits in a paragraph that also has an unsafe one" {
+    try expectFixed(
+        "First clause. Second clause. # Not a heading",
+        "First clause.\nSecond clause. # Not a heading",
     );
 }
