@@ -6,7 +6,8 @@ The intent is to make diffs easier to parse for humans.
 - Each independent clause is given its own line.
 - Applies to paragraphs, lists (numbered and bulleted), and block quotes.
 - Does _not_ apply to headings, tables, or source code.
-- A clause is left on its line if breaking there would change how the document renders, e.g. when the next clause starts with `#` or `- ` and would become a heading or list item.
+- If a clause would become a new block on its own line (e.g. it starts with `#` or `- `), the syntax responsible is backslash-escaped (`\#`, `\-`) so the clause still renders as text.
+- A clause is left on its line if breaking there would change how the document renders even with escaping, e.g. when it starts with an HTML tag or a code fence.
 
 The files to process are provided as CLI arguments.
 The default output reports the number of errors in each file, exiting 0 only if there are no errors in any file.

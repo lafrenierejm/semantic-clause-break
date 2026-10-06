@@ -153,7 +153,7 @@ const ExampleIterator = struct {
 
 fn fix(arena: std.mem.Allocator, source: []const u8) ![]u8 {
     var doc = try markz.parseWith(arena, source, .{ .gfm = true });
-    const result = try reflow.analyze(arena, &doc);
+    const result = try reflow.analyze(arena, &doc, .{});
     return reflow.applyInsertions(arena, source, result.insertions);
 }
 

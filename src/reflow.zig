@@ -10,10 +10,20 @@ pub const Insertion = struct {
     at: usize,
     len: usize,
     prefix: []const u8,
+    /// Source offset (at or after `at + len`) before which a backslash is
+    /// written, so punctuation that would start a block on the new line
+    /// (e.g. "#" or the "." in "1.") is read as text instead.
+    escape: ?usize = null,
 };
 
 pub const AnalyzeResult = struct {
     insertions: []Insertion,
+};
+
+pub const Options = struct {
+    /// Where a break would make the next clause start a block, escape the
+    /// syntax responsible instead of leaving the clause on its line.
+    escape: bool = true,
 };
 
 /// Walk every paragraph in `doc` and report where an independent-clause
@@ -31,7 +41,7 @@ pub const AnalyzeResult = struct {
 ///
 /// A boundary is only reported if breaking the line there leaves the
 /// rendered document unchanged; see `keepRenderPreserving`.
-pub fn analyze(allocator: std.mem.Allocator, doc: *const markz.Document) !AnalyzeResult {
+pub fn analyze(allocator: std.mem.Allocator, doc: *const markz.Document, options: Options) !AnalyzeResult {
     var candidates: std.ArrayListUnmanaged(Insertion) = .empty;
     defer candidates.deinit(allocator);
     var events_buf: std.ArrayListUnmanaged(markz.Event) = .empty;
@@ -40,7 +50,7 @@ pub fn analyze(allocator: std.mem.Allocator, doc: *const markz.Document) !Analyz
 
     try walkBlock(allocator, doc, doc.root, &cursor, &candidates, &events_buf, true, true);
 
-    return .{ .insertions = try keepRenderPreserving(allocator, doc, candidates.items) };
+    return .{ .insertions = try keepRenderPreserving(allocator, doc, candidates.items, options) };
 }
 
 /// Return the subset of `candidates` (sorted ascending by `at`) that can be
@@ -54,9 +64,11 @@ pub fn analyze(allocator: std.mem.Allocator, doc: *const markz.Document) !Analyz
 /// asked directly, in two stages:
 ///
 /// 1. Each candidate is checked locally (see `continuesParagraph`): the
-///    common case of a split starting a new block is rejected without
+///    common case of a split starting a new block is caught without
 ///    rendering the whole document, which would make a large file with many
-///    such candidates quadratic.
+///    such candidates quadratic. If `options.escape` is set, such a
+///    candidate is retried with its leading syntax escaped (see
+///    `escapeOffset`), and only rejected if that fails too.
 /// 2. Effects aren't always local (e.g. a line left behind becoming a table
 ///    delimiter row), so the survivors are applied together and the whole
 ///    document is re-rendered and compared. That normally costs one render.
@@ -69,7 +81,7 @@ pub fn analyze(allocator: std.mem.Allocator, doc: *const markz.Document) !Analyz
 /// "1." is also broken off, since an empty list item can't interrupt a
 /// paragraph). Rejected candidates are retried until a round accepts none,
 /// so the result is the same as running the fixer on its own output.
-fn keepRenderPreserving(allocator: std.mem.Allocator, doc: *const markz.Document, candidates: []const Insertion) ![]Insertion {
+fn keepRenderPreserving(allocator: std.mem.Allocator, doc: *const markz.Document, candidates: []Insertion, options: Options) ![]Insertion {
     if (candidates.len == 0) return allocator.alloc(Insertion, 0);
 
     const original = try markz.renderHtml(allocator, doc);
@@ -90,13 +102,23 @@ fn keepRenderPreserving(allocator: std.mem.Allocator, doc: *const markz.Document
 
     var pending: std.ArrayListUnmanaged(usize) = .empty;
     defer pending.deinit(allocator);
-    for (candidates, 0..) |c, i| {
+    for (candidates, 0..) |*c, i| {
         // The new line runs to the next candidate (assumed accepted too) or
         // to the end of the current line.
         const start = c.at + c.len;
         const line_end = std.mem.indexOfScalarPos(u8, doc.source, start, '\n') orelse doc.source.len;
         const end = if (i + 1 < candidates.len) @min(candidates[i + 1].at, line_end) else line_end;
-        if (try continuesParagraph(&check.scratch, doc.source[start..end])) try pending.append(allocator, i);
+        const line = doc.source[start..end];
+        if (try continuesParagraph(&check.scratch, line, null)) {
+            try pending.append(allocator, i);
+            continue;
+        }
+        if (!options.escape) continue;
+        const offset = escapeOffset(line) orelse continue;
+        if (try continuesParagraph(&check.scratch, line, offset)) {
+            c.escape = start + offset;
+            try pending.append(allocator, i);
+        }
     }
 
     while (pending.items.len > 0) {
@@ -160,14 +182,36 @@ const RenderCheck = struct {
 
 /// True if `line`, placed on the line after a paragraph's first line, is
 /// still part of that paragraph rather than starting a new block (or turning
-/// the paragraph into something else, like a setext heading or table).
-fn continuesParagraph(scratch: *std.heap.ArenaAllocator, line: []const u8) !bool {
+/// the paragraph into something else, like a setext heading or table). If
+/// `escape` is set, a backslash is written before that offset in `line`, as
+/// `Insertion.escape` would.
+fn continuesParagraph(scratch: *std.heap.ArenaAllocator, line: []const u8, escape: ?usize) !bool {
     defer _ = scratch.reset(.retain_capacity);
     const arena = scratch.allocator();
-    const probe = try std.mem.concat(arena, u8, &.{ "p\n", line });
+    const split = escape orelse line.len;
+    const backslash: []const u8 = if (escape != null) "\\" else "";
+    const probe = try std.mem.concat(arena, u8, &.{ "p\n", line[0..split], backslash, line[split..] });
     const doc = try markz.parseWith(arena, probe, .{ .gfm = true });
     const first = doc.root.first_child orelse return false;
     return first.tag == .paragraph and first.next == null;
+}
+
+/// Where to put a backslash in `line` so its leading block syntax reads as
+/// text: before leading punctuation (e.g. "#", "-", ">"), or after the
+/// digits of an ordered list marker ("1." becomes "1\."). Null if there's
+/// nothing to escape, or if escaping would change how the line renders:
+/// a "<" that starts an HTML block is raw HTML in the original paragraph,
+/// and escaping one backtick of a fence changes the code span it opens.
+fn escapeOffset(line: []const u8) ?usize {
+    if (line.len == 0) return null;
+    const first = line[0];
+    if (first == '<' or first == '`') return null;
+    if (std.ascii.isPunctuation(first)) return 0;
+    if (!std.ascii.isDigit(first)) return null;
+    var i: usize = 1;
+    while (i < line.len and std.ascii.isDigit(line[i])) i += 1;
+    if (i < line.len and (line[i] == '.' or line[i] == ')')) return i;
+    return null;
 }
 
 /// Compare `a` and `b`, treating every run of spaces, tabs, and newlines as
@@ -208,6 +252,11 @@ pub fn applyInsertions(allocator: std.mem.Allocator, source: []const u8, inserti
         try out.append(allocator, '\n');
         try out.appendSlice(allocator, ins.prefix);
         last = ins.at + ins.len;
+        if (ins.escape) |escape| {
+            try out.appendSlice(allocator, source[last..escape]);
+            try out.append(allocator, '\\');
+            last = escape;
+        }
     }
     try out.appendSlice(allocator, source[last..]);
 
@@ -392,12 +441,16 @@ fn isListMarker(token: []const u8) bool {
 }
 
 fn expectFixed(source: []const u8, expected: []const u8) !void {
+    try expectFixedWith(.{}, source, expected);
+}
+
+fn expectFixedWith(options: Options, source: []const u8, expected: []const u8) !void {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
     var doc = try markz.parseWith(allocator, source, .{ .gfm = true });
-    const result = try analyze(allocator, &doc);
+    const result = try analyze(allocator, &doc, options);
     const fixed = try applyInsertions(allocator, source, result.insertions);
     try std.testing.expectEqualStrings(expected, fixed);
 }
@@ -494,28 +547,59 @@ test "nested list item blanks every list marker in the prefix" {
     );
 }
 
-test "does not split where the next clause would start a heading" {
-    const source = "See below. # Not a heading";
-    try expectFixed(source, source);
+test "escapes a leading '#' that would start a heading" {
+    try expectFixed(
+        "See below. # Not a heading",
+        "See below.\n\\# Not a heading",
+    );
 }
 
-test "does not split where the next clause would start a list" {
-    const source = "Steps follow. - Open the file";
-    try expectFixed(source, source);
+test "escapes a leading '-' that would start a list item" {
+    try expectFixed(
+        "Steps follow. - Open the file",
+        "Steps follow.\n\\- Open the file",
+    );
 }
 
-test "does not split where the line left behind would underline a setext heading" {
-    const source = "First clause. Second clause.\nThird clause. ---";
-    try expectFixed(source, "First clause.\nSecond clause.\nThird clause. ---");
+test "escapes the delimiter, not the digit, of an ordered list marker" {
+    try expectFixed(
+        "Steps follow. 1) Open the file",
+        "Steps follow.\n1\\) Open the file",
+    );
 }
 
-test "does not split where the next clause would open a code fence" {
+test "escapes a leading '>' that would start a block quote" {
+    try expectFixed(
+        "As they said: > quoted text",
+        "As they said:\n\\> quoted text",
+    );
+}
+
+test "escapes a line that would underline a setext heading" {
+    try expectFixed(
+        "First clause. Second clause.\nThird clause. ---",
+        "First clause.\nSecond clause.\nThird clause.\n\\---",
+    );
+}
+
+test "does not split where escaping a code fence would change its code span" {
     const source = "Run this. ``` code";
     try expectFixed(source, source);
 }
 
-test "keeps safe splits in a paragraph that also has an unsafe one" {
-    try expectFixed(
+test "does not split where escaping an HTML block tag would show it as text" {
+    const source = "See this. <div>";
+    try expectFixed(source, source);
+}
+
+test "does not split or escape block syntax when escaping is off" {
+    const source = "See below. # Not a heading";
+    try expectFixedWith(.{ .escape = false }, source, source);
+}
+
+test "keeps safe splits in a paragraph that also has an unsafe one when escaping is off" {
+    try expectFixedWith(
+        .{ .escape = false },
         "First clause. Second clause. # Not a heading",
         "First clause.\nSecond clause. # Not a heading",
     );

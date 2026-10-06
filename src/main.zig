@@ -279,7 +279,7 @@ fn processFile(
 
     const source = cwd.readFileAlloc(io, path, arena, max_file_size) catch |err| return .{ .err = err };
     var doc = markz.parseWith(arena, source, .{ .gfm = true }) catch |err| return .{ .err = err };
-    const result = reflow.analyze(arena, &doc) catch |err| return .{ .err = err };
+    const result = reflow.analyze(arena, &doc, .{}) catch |err| return .{ .err = err };
 
     if (fix) {
         if (result.insertions.len == 0) return .{ .fixed = false };
