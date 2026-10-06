@@ -18,6 +18,7 @@ fn expectOk(args: []const []const u8, expected: Options) !void {
         else => return error.TestUnexpectedResult,
     };
     try std.testing.expectEqual(expected.fix, opts.fix);
+    try std.testing.expectEqual(expected.escape, opts.escape);
     try std.testing.expectEqual(expected.max_size_mib, opts.max_size_mib);
     try std.testing.expectEqual(expected.paths.len, opts.paths.len);
     for (expected.paths, opts.paths) |e, a| try std.testing.expectEqualStrings(e, a);
@@ -42,6 +43,10 @@ test "parseArgs: --fix and --max-size-mib" {
         &.{ "--fix", "--max-size-mib", "4", "a.md" },
         .{ .fix = true, .max_size_mib = 4, .paths = &.{"a.md"} },
     );
+}
+
+test "parseArgs: --no-escape turns escaping off" {
+    try expectOk(&.{ "--no-escape", "a.md" }, .{ .escape = false, .paths = &.{"a.md"} });
 }
 
 test "parseArgs: --help and -h short-circuit before paths are required" {
@@ -103,7 +108,7 @@ const default_max_size_mib: usize = 16;
 const program_name = "semantic-clause-break";
 const positional_usage = "<file>...";
 
-const FlagId = enum { fix, max_size_mib, help };
+const FlagId = enum { fix, no_escape, max_size_mib, help };
 
 const Flag = struct {
     id: FlagId,
@@ -114,6 +119,7 @@ const Flag = struct {
 
 const flags = [_]Flag{
     .{ .id = .fix, .long = "--fix", .help = "Apply fixes to the given files instead of only reporting errors." },
+    .{ .id = .no_escape, .long = "--no-escape", .help = "Leave a clause on its line instead of backslash-escaping block syntax it starts with." },
     .{ .id = .max_size_mib, .long = "--max-size-mib", .help = std.fmt.comptimePrint("Maximum file size to read, in MiB (default: {d}).", .{default_max_size_mib}) },
     .{ .id = .help, .long = "--help", .short = "-h", .help = "Print this help message and exit." },
 };
@@ -144,6 +150,7 @@ fn printUsage() void {
 
 const Options = struct {
     fix: bool = false,
+    escape: bool = true,
     max_size_mib: usize = default_max_size_mib,
     paths: []const []const u8 = &.{},
 };
@@ -173,6 +180,7 @@ const ParseOutcome = union(enum) {
 /// race a read against a write to that file.
 fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !ParseOutcome {
     var fix = false;
+    var escape = true;
     var max_size_mib: usize = default_max_size_mib;
     var paths: std.ArrayListUnmanaged([]const u8) = .empty;
 
@@ -189,6 +197,7 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !ParseOutco
             if (matchFlag(arg)) |flag| {
                 switch (flag.id) {
                     .fix => fix = true,
+                    .no_escape => escape = false,
                     .max_size_mib => {
                         i += 1;
                         if (i >= args.len) {
@@ -221,7 +230,7 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !ParseOutco
 
     if (paths.items.len == 0) return .missing_paths;
 
-    return .{ .ok = .{ .fix = fix, .max_size_mib = max_size_mib, .paths = try paths.toOwnedSlice(allocator) } };
+    return .{ .ok = .{ .fix = fix, .escape = escape, .max_size_mib = max_size_mib, .paths = try paths.toOwnedSlice(allocator) } };
 }
 
 const FileOutcome = union(enum) {
@@ -271,6 +280,7 @@ fn processFile(
     cwd: std.Io.Dir,
     path: []const u8,
     fix: bool,
+    escape: bool,
     max_file_size: std.Io.Limit,
 ) FileOutcome {
     var arena_state = std.heap.ArenaAllocator.init(gpa);
@@ -279,7 +289,7 @@ fn processFile(
 
     const source = cwd.readFileAlloc(io, path, arena, max_file_size) catch |err| return .{ .err = err };
     var doc = markz.parseWith(arena, source, .{ .gfm = true }) catch |err| return .{ .err = err };
-    const result = reflow.analyze(arena, &doc, .{}) catch |err| return .{ .err = err };
+    const result = reflow.analyze(arena, &doc, .{ .escape = escape }) catch |err| return .{ .err = err };
 
     if (fix) {
         if (result.insertions.len == 0) return .{ .fixed = false };
@@ -343,7 +353,7 @@ pub fn main(init: std.process.Init) !u8 {
     // Each file is read, parsed, and analyzed independently, so let the Io
     // implementation overlap their I/O instead of processing sequentially.
     for (opts.paths, futures) |path, *future| {
-        future.* = std.Io.async(io, processFile, .{ io, gpa, cwd, path, opts.fix, file_size_limit });
+        future.* = std.Io.async(io, processFile, .{ io, gpa, cwd, path, opts.fix, opts.escape, file_size_limit });
     }
 
     var any_errors = false;

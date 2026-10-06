@@ -87,10 +87,18 @@ const FailureReason = enum {
     missed_boundary,
 };
 
-/// Minimum number of inputs the fixer must change across all mutations.
-/// Guards against a regression that stops the fixer from splitting at all,
-/// which every property would otherwise pass.
-const min_changed = 700;
+/// The number of examples parsed from spec.txt must exceed this. Guards
+/// against the parser silently matching nothing, e.g. if the fence format
+/// changes. The pinned spec has 670 examples that aren't disabled.
+const min_examples = 600;
+
+/// Minimum number of inputs the fixer must change across all mutations,
+/// under each of `escape_modes`. Guards against a regression that stops the
+/// fixer from splitting at all, which every property would otherwise pass.
+const min_changed = min_examples + 100;
+
+/// Every example and mutation is checked under each of these.
+const escape_modes = [_]reflow.Options{ .{ .escape = true }, .{ .escape = false } };
 
 const Example = struct {
     /// 1-based position in spec.txt, matching the numbering on the spec site.
@@ -151,9 +159,9 @@ const ExampleIterator = struct {
     }
 };
 
-fn fix(arena: std.mem.Allocator, source: []const u8) ![]u8 {
+fn fix(arena: std.mem.Allocator, source: []const u8, options: reflow.Options) ![]u8 {
     var doc = try markz.parseWith(arena, source, .{ .gfm = true });
-    const result = try reflow.analyze(arena, &doc, .{});
+    const result = try reflow.analyze(arena, &doc, options);
     return reflow.applyInsertions(arena, source, result.insertions);
 }
 
@@ -223,10 +231,10 @@ const Outcome = struct {
     failure: ?[]const u8,
 };
 
-fn check(arena: std.mem.Allocator, markdown: []const u8) !Outcome {
-    const fixed = try fix(arena, markdown);
+fn check(arena: std.mem.Allocator, markdown: []const u8, options: reflow.Options) !Outcome {
+    const fixed = try fix(arena, markdown, options);
     const changed = !std.mem.eql(u8, markdown, fixed);
-    const refixed = try fix(arena, fixed);
+    const refixed = try fix(arena, fixed, options);
     if (!std.mem.eql(u8, fixed, refixed)) {
         return .{ .changed = changed, .failure = try std.fmt.allocPrint(arena, "not idempotent\n--- fixed ---\n{s}--- fixed again ---\n{s}", .{ fixed, refixed }) };
     }
@@ -253,7 +261,7 @@ test "GFM spec examples: fixing is idempotent and preserves rendering" {
 
     var unexpected: usize = 0;
     var seen: usize = 0;
-    var changed: usize = 0;
+    var changed: [escape_modes.len]usize = @splat(0);
     var it = ExampleIterator.init(spec_arena.allocator(), spec);
     while (try it.next()) |example| {
         // The spec marks these as not passing in cmark-gfm itself.
@@ -261,40 +269,43 @@ test "GFM spec examples: fixing is idempotent and preserves rendering" {
         seen += 1;
 
         for (std.enums.values(Mutation)) |mutation| {
-            defer _ = check_arena.reset(.retain_capacity);
-            const arena = check_arena.allocator();
+            for (escape_modes, &changed) |options, *mode_changed| {
+                defer _ = check_arena.reset(.retain_capacity);
+                const arena = check_arena.allocator();
 
-            const markdown = try mutate(arena, example.markdown, mutation);
-            const outcome = try check(arena, markdown);
-            if (outcome.changed) changed += 1;
-            const known_reason = knownFailure(example.number, mutation);
-            if (outcome.failure) |msg| {
-                if (known_reason != null) continue;
-                unexpected += 1;
-                std.debug.print(
-                    "\n=== example {d} ({s}), mutation {t}: {s}\n--- markdown ---\n{s}",
-                    .{ example.number, example.section, mutation, msg, markdown },
-                );
-            } else if (known_reason) |reason| {
-                unexpected += 1;
-                std.debug.print(
-                    "\n=== example {d} ({s}), mutation {t} is listed in known_failures ({t}) but now passes; remove it\n",
-                    .{ example.number, example.section, mutation, reason },
-                );
+                const markdown = try mutate(arena, example.markdown, mutation);
+                const outcome = try check(arena, markdown, options);
+                if (outcome.changed) mode_changed.* += 1;
+                const known_reason = knownFailure(example.number, mutation);
+                if (outcome.failure) |msg| {
+                    if (known_reason != null) continue;
+                    unexpected += 1;
+                    std.debug.print(
+                        "\n=== example {d} ({s}), mutation {t}, escape {}: {s}\n--- markdown ---\n{s}",
+                        .{ example.number, example.section, mutation, options.escape, msg, markdown },
+                    );
+                } else if (known_reason) |reason| {
+                    unexpected += 1;
+                    std.debug.print(
+                        "\n=== example {d} ({s}), mutation {t}, escape {} is listed in known_failures ({t}) but now passes; remove it\n",
+                        .{ example.number, example.section, mutation, options.escape, reason },
+                    );
+                }
             }
         }
     }
 
-    // Guard against the parser silently matching nothing.
-    try std.testing.expect(seen > 600);
-    if (changed < min_changed) {
-        std.debug.print(
-            "\nonly {d} input(s) were changed by the fixer; expected at least {d}\n",
-            .{ changed, min_changed },
-        );
-        unexpected += 1;
+    try std.testing.expect(min_examples < seen);
+    for (escape_modes, changed) |options, mode_changed| {
+        if (mode_changed < min_changed) {
+            std.debug.print(
+                "\nonly {d} input(s) were changed by the fixer with escape {}; expected at least {d}\n",
+                .{ mode_changed, options.escape, min_changed },
+            );
+            unexpected += 1;
+        }
     }
-    if (unexpected > 0) {
+    if (1 <= unexpected) {
         std.debug.print("\n{d} GFM spec input(s) behaved unexpectedly\n", .{unexpected});
         return error.TestUnexpectedResult;
     }
