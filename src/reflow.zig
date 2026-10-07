@@ -34,10 +34,11 @@ pub const Options = struct {
 /// offsets for them), so exact positions are recovered here by searching
 /// forward through `doc.source` for each node's own text, in document
 /// order. The search cursor only ever moves forward, so a node is never
-/// matched against an earlier occurrence of the same text. If a node's text
-/// can't be found (e.g. it was decoded from an HTML entity and so no longer
-/// matches the source bytes verbatim), the rest of that paragraph is safely
-/// skipped rather than guessed at.
+/// matched against an earlier occurrence of the same text. A text node's
+/// content is decoded, so backslash escapes are allowed for when
+/// matching it (see `findText`). If a node's text still can't be found
+/// (e.g. it was decoded from an HTML entity), the rest of that paragraph
+/// is safely skipped rather than guessed at.
 ///
 /// A boundary is only reported if breaking the line there leaves the
 /// rendered document unchanged; see `keepRenderPreserving`.
@@ -356,6 +357,10 @@ fn processParagraph(
     var seen_markup_since_break = false;
     var boundaries: std.ArrayListUnmanaged(clauses.Boundary) = .empty;
     defer boundaries.deinit(allocator);
+    // For the current text node, the source offset of each byte of its
+    // (decoded) text, plus one for its end; see `findText`.
+    var offsets: std.ArrayListUnmanaged(usize) = .empty;
+    defer offsets.deinit(allocator);
 
     for (events, 0..) |event, idx| {
         const node = switch (event) {
@@ -382,9 +387,16 @@ fn processParagraph(
         const text = doc.nodeText(node);
         if (text.len == 0) continue;
 
-        const found = std.mem.indexOf(u8, doc.source[cursor.*..], text) orelse return;
-        const real_start = cursor.* + found;
-        cursor.* = real_start + text.len;
+        const real_start = if (node.tag == .text) start: {
+            try offsets.resize(allocator, text.len + 1);
+            const start = findText(doc.source, cursor.*, text, offsets.items) orelse return;
+            cursor.* = offsets.items[text.len];
+            break :start start;
+        } else start: {
+            const found = std.mem.indexOf(u8, doc.source[cursor.*..], text) orelse return;
+            cursor.* = cursor.* + found + text.len;
+            break :start cursor.* - text.len;
+        };
 
         if (line_prefix == null and node.tag == .text and !seen_markup_since_break) {
             const line_start = if (std.mem.lastIndexOfScalar(u8, doc.source[0..real_start], '\n')) |p| p + 1 else 0;
@@ -404,13 +416,47 @@ fn processParagraph(
         for (boundaries.items) |b| {
             const has_more_after = if (b.end < text.len) true else hasMoreContentAfter(events, idx);
             if (!has_more_after) continue;
+            // A boundary is a run of spaces, which are never escaped, so its
+            // source span is exactly as long as its decoded one.
+            const at = offsets.items[b.start];
             try insertions.append(allocator, .{
-                .at = real_start + b.start,
-                .len = b.end - b.start,
+                .at = at,
+                .len = offsets.items[b.end] - at,
                 .prefix = line_prefix.?,
             });
         }
     }
+}
+
+/// Find the first occurrence at or after `from` in `source` of `text`, a text
+/// node's decoded content, and return its start. In a text node, a
+/// backslash followed by ASCII punctuation is always an escape, so "\*" in
+/// the source decodes to "*" in `text`. `offsets` (`text.len + 1` long)
+/// receives the source offset of each byte of `text` and, last, the end of
+/// the match, so positions found in `text` can be mapped back to `source`.
+fn findText(source: []const u8, from: usize, text: []const u8, offsets: []usize) ?usize {
+    var start = from;
+    while (start < source.len) : (start += 1) {
+        if (matchText(source, start, text, offsets)) return start;
+    }
+    return null;
+}
+
+fn matchText(source: []const u8, start: usize, text: []const u8, offsets: []usize) bool {
+    var i = start;
+    for (text, 0..) |c, k| {
+        if (i >= source.len) return false;
+        offsets[k] = i;
+        if (source[i] == '\\' and i + 1 < source.len and std.ascii.isPunctuation(source[i + 1])) {
+            if (source[i + 1] != c) return false;
+            i += 2;
+        } else {
+            if (source[i] != c) return false;
+            i += 1;
+        }
+    }
+    offsets[text.len] = i;
+    return true;
 }
 
 /// Convert a captured line prefix into the form new continuation lines
@@ -602,5 +648,26 @@ test "keeps safe splits in a paragraph that also has an unsafe one when escaping
         .{ .escape = false },
         "First clause. Second clause. # Not a heading",
         "First clause.\nSecond clause. # Not a heading",
+    );
+}
+
+test "splits after backslash escapes, at the boundary's position in the source" {
+    try expectFixed(
+        "Use \\*stars\\* here. Then more.",
+        "Use \\*stars\\* here.\nThen more.",
+    );
+}
+
+test "escaped text is matched on its own line, not a later line with the same decoded text" {
+    try expectFixed(
+        "Lead clause. \\[foo]\nLead clause. [foo]",
+        "Lead clause.\n\\[foo]\nLead clause.\n[foo]",
+    );
+}
+
+test "a backslash before a non-punctuation character is literal text" {
+    try expectFixed(
+        "Path C:\\dir here. Then more.",
+        "Path C:\\dir here.\nThen more.",
     );
 }

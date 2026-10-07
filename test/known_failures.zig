@@ -12,9 +12,7 @@ const Mutation = @import("gfm_spec.zig").Mutation;
 /// relies on that order to binary search.
 pub const entries = [_]KnownFailure{
     .{ .number = 164, .mutation = .insert_boundary, .reason = .ref_def_label },
-    .{ .number = 171, .mutation = .prefix_lines, .reason = .missed_boundary },
     .{ .number = 181, .mutation = .prefix_lines, .reason = .code_span_match },
-    .{ .number = 571, .mutation = .prefix_lines, .reason = .missed_boundary },
 };
 
 pub const KnownFailure = struct { number: usize, mutation: Mutation, reason: FailureReason };
@@ -30,9 +28,6 @@ pub const FailureReason = enum {
     /// A later paragraph's text then matches inside the code span, the split
     /// lands there, and the paragraph itself is never split.
     code_span_match,
-    /// A second pass splits at a boundary the first pass skipped; each line
-    /// splits fine in isolation. Cause not yet diagnosed.
-    missed_boundary,
 };
 
 /// Identifies one input: a spec example under one mutation.
