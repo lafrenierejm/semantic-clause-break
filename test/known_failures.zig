@@ -10,24 +10,13 @@ const Mutation = @import("gfm_spec.zig").Mutation;
 /// Entries must be in strictly increasing (number, mutation) order, which
 /// is checked at compile time and also rules out duplicates. `lookup`
 /// relies on that order to binary search.
-pub const entries = [_]KnownFailure{
-    .{ .number = 164, .mutation = .insert_boundary, .reason = .ref_def_label },
-    .{ .number = 181, .mutation = .prefix_lines, .reason = .code_span_match },
-};
+pub const entries = [_]KnownFailure{};
 
 pub const KnownFailure = struct { number: usize, mutation: Mutation, reason: FailureReason };
 
 /// Why an entry in `entries` fails.
 pub const FailureReason = enum {
-    /// The paragraph's text also appears earlier in a link reference
-    /// definition's label, which isn't a node in the tree, so the split
-    /// lands in the label and the paragraph itself is never split.
-    ref_def_label,
-    /// A code span whose text spans lines can't be found verbatim (its line
-    /// breaks render as spaces), so the search cursor isn't moved past it.
-    /// A later paragraph's text then matches inside the code span, the split
-    /// lands there, and the paragraph itself is never split.
-    code_span_match,
+    // Add a value per distinct cause, with a doc comment explaining it.
 };
 
 /// Identifies one input: a spec example under one mutation.

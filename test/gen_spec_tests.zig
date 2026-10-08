@@ -66,15 +66,8 @@ pub fn main(init: std.process.Init) !u8 {
     for (examples.items, 0..) |example, i| {
         for (std.enums.values(gfm_spec.Mutation)) |mutation| {
             try w.print("\ntest \"GFM spec example {d} ({f}): {t}\" {{\n", .{ example.number, std.zig.fmtString(example.section), mutation });
-            if (known_failures.lookup(example.number, mutation)) |found| {
-                matched[found.index] = true;
-                try w.print(
-                    "    // Known failure; see `{t}` in test/known_failures.zig.\n    try spec_check.expectKnownFailure(examples[{d}], .{t}, .{t});\n    return error.SkipZigTest;\n",
-                    .{ found.reason, i, mutation, found.reason },
-                );
-            } else {
-                try w.print("    try spec_check.checkCase(examples[{d}], .{t});\n", .{ i, mutation });
-            }
+            const is_known_failure = try writeKnownFailure(w, matched, example.number, i, mutation);
+            if (!is_known_failure) try w.print("    try spec_check.checkCase(examples[{d}], .{t});\n", .{ i, mutation });
             try w.writeAll("}\n");
         }
     }
@@ -88,4 +81,21 @@ pub fn main(init: std.process.Init) !u8 {
 
     try cwd.writeFile(io, .{ .sub_path = args[2], .data = out.written() });
     return 0;
+}
+
+/// If example `number` under `mutation` is a known failure, write the body of
+/// its test (checking it still fails, then skipping) and mark it in
+/// `matched`. `i` is the example's index in the generated `examples`.
+fn writeKnownFailure(w: *std.Io.Writer, matched: []bool, number: usize, i: usize, mutation: gfm_spec.Mutation) !bool {
+    // With no known failures, `FailureReason` is an empty enum, whose tag
+    // name can't be formatted; skip analyzing the rest in that case.
+    if (known_failures.entries.len == 0) return false;
+
+    const found = known_failures.lookup(number, mutation) orelse return false;
+    matched[found.index] = true;
+    try w.print(
+        "    // Known failure; see `{t}` in test/known_failures.zig.\n    try spec_check.expectKnownFailure(examples[{d}], .{t}, .{t});\n    return error.SkipZigTest;\n",
+        .{ found.reason, i, mutation, found.reason },
+    );
+    return true;
 }

@@ -283,9 +283,19 @@ fn walkBlock(
 ) !void {
     switch (node.tag) {
         .paragraph => {
+            // Where the paragraph's span is known, search only within the
+            // span. Its start is after any link reference definitions markz
+            // stripped from the paragraph, which aren't nodes and could
+            // otherwise match the paragraph's own text (e.g. a link's
+            // label). Its end keeps a node that can't be found here from
+            // matching text in a later block.
+            const limit = if (spans_are_offsets) limit: {
+                cursor.* = @max(cursor.*, node.source.start);
+                break :limit node.source.end;
+            } else doc.source.len;
             events_buf.clearRetainingCapacity();
             try collectParagraphEvents(allocator, node, events_buf);
-            try processParagraph(allocator, doc, events_buf.items, cursor, insertions, at_top_level);
+            try processParagraph(allocator, doc, doc.source[0..limit], events_buf.items, cursor, insertions, at_top_level);
         },
         .document, .block_quote, .list, .list_item => {
             // Once nested in a block quote or list, a paragraph's true line
@@ -335,9 +345,12 @@ fn hasMoreContentAfter(events: []const markz.Event, idx: usize) bool {
     return false;
 }
 
+/// `source` is `doc.source` cut off where the search for this paragraph's
+/// nodes must stop.
 fn processParagraph(
     allocator: std.mem.Allocator,
     doc: *const markz.Document,
+    source: []const u8,
     events: []const markz.Event,
     cursor: *usize,
     insertions: *std.ArrayListUnmanaged(Insertion),
@@ -389,11 +402,12 @@ fn processParagraph(
 
         const real_start = if (node.tag == .text) start: {
             try offsets.resize(allocator, text.len + 1);
-            const start = findText(doc.source, cursor.*, text, offsets.items) orelse return;
+            const start = findText(source, cursor.*, text, offsets.items) orelse return;
             cursor.* = offsets.items[text.len];
             break :start start;
         } else start: {
-            const found = std.mem.indexOf(u8, doc.source[cursor.*..], text) orelse return;
+            if (cursor.* > source.len) return;
+            const found = std.mem.indexOf(u8, source[cursor.*..], text) orelse return;
             cursor.* = cursor.* + found + text.len;
             break :start cursor.* - text.len;
         };
@@ -669,5 +683,26 @@ test "a backslash before a non-punctuation character is literal text" {
     try expectFixed(
         "Path C:\\dir here. Then more.",
         "Path C:\\dir here.\nThen more.",
+    );
+}
+
+test "a link's label repeated in a preceding reference definition splits the link, not the definition" {
+    try expectFixed(
+        "[Foo. Next bar]: /url\n\n[Foo. Next bar]",
+        "[Foo. Next bar]: /url\n\n[Foo.\nNext bar]",
+    );
+}
+
+test "paragraph text found inside a preceding reference definition splits the paragraph" {
+    try expectFixed(
+        "[Foo. Bar]: /url\n\nFoo. Bar",
+        "[Foo. Bar]: /url\n\nFoo.\nBar",
+    );
+}
+
+test "paragraph text found inside an earlier paragraph's multi-line code span splits the later paragraph" {
+    try expectFixed(
+        "One. `code\nTwo. x`\n\nTwo. x",
+        "One.\n`code\nTwo. x`\n\nTwo.\nx",
     );
 }
