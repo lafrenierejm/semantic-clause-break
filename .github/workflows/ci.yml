@@ -46,7 +46,8 @@ jobs:
     permissions:
       contents: read
     steps:
-      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Disable AppArmor
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -67,6 +68,8 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Disable AppArmor
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
