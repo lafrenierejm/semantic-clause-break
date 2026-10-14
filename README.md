@@ -11,10 +11,11 @@ The intent is to make diffs easier to parse for humans.
 - A clause is left on its line if adding a newline would change how the document renders even with escaping, e.g. when the clause starts with an HTML tag or a code fence.
 
 The files to process are provided as CLI arguments.
-The default output reports the number of errors in each file, exiting 0 only if there are no errors in any file.
 
-The `--fix` option can be passed to the CLI to apply the changes to the provided files.
-This exits 1 if changes were made and 0 if no changes were needed (i.e. there were no existing errors in any files).
+- The default output reports the number of errors in each file, exiting 0 only if there are no errors in any file.
+- The `--fix` option can be passed to the CLI to apply the changes to the provided files.
+  This exits 1 if changes were made and 0 if no changes were needed (i.e. there were no existing errors in any files).
+- The `--exit-zero` option instead exits nonzero only if a file cannot be read or parsed, regardless of `--fix` or any errors found.
 
 ## Examples
 

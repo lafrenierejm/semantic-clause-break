@@ -17,6 +17,7 @@ fn expectOk(args: []const []const u8, expected: Options) !void {
         else => return error.TestUnexpectedResult,
     };
     try std.testing.expectEqual(expected.fix, opts.fix);
+    try std.testing.expectEqual(expected.exit_zero, opts.exit_zero);
     try std.testing.expectEqual(expected.escape, opts.escape);
     try std.testing.expectEqual(expected.max_size_mib, opts.max_size_mib);
     try std.testing.expectEqual(expected.paths.len, opts.paths.len);
@@ -42,6 +43,10 @@ test "parseArgs: --fix and --max-size-mib" {
         &.{ "--fix", "--max-size-mib", "4", "a.md" },
         .{ .fix = true, .max_size_mib = 4, .paths = &.{"a.md"} },
     );
+}
+
+test "parseArgs: --exit-zero" {
+    try expectOk(&.{ "--exit-zero", "a.md" }, .{ .exit_zero = true, .paths = &.{"a.md"} });
 }
 
 test "parseArgs: --no-escape turns escaping off" {
@@ -88,18 +93,18 @@ test "parseArgs: -- must have following arguments" {
     try std.testing.expect((try parseArgs(arena.allocator(), &.{"--"})) == .missing_paths);
 }
 
-test "exitCode: check mode fails only when a file has errors" {
+test "exitCode: fails when a file has findings or changed" {
     try std.testing.expectEqual(@as(u8, 0), exitCode(false, false, false));
+    try std.testing.expectEqual(@as(u8, 1), exitCode(false, false, true));
+}
+
+test "exitCode: a failed file always fails" {
     try std.testing.expectEqual(@as(u8, 1), exitCode(false, true, false));
+    try std.testing.expectEqual(@as(u8, 1), exitCode(true, true, true));
 }
 
-test "exitCode: fix mode fails when a file changed" {
-    try std.testing.expectEqual(@as(u8, 0), exitCode(true, false, false));
-    try std.testing.expectEqual(@as(u8, 1), exitCode(true, false, true));
-}
-
-test "exitCode: fix mode still fails when a file errored, even if nothing changed" {
-    try std.testing.expectEqual(@as(u8, 1), exitCode(true, true, false));
+test "exitCode: --exit-zero ignores findings and changes" {
+    try std.testing.expectEqual(@as(u8, 0), exitCode(true, false, true));
 }
 
 const default_max_size_mib: usize = 16;
@@ -107,7 +112,7 @@ const default_max_size_mib: usize = 16;
 const program_name = "semantic-clause-break";
 const positional_usage = "<file>...";
 
-const FlagId = enum { fix, no_escape, max_size_mib, help };
+const FlagId = enum { fix, exit_zero, no_escape, max_size_mib, help };
 
 const Flag = struct {
     id: FlagId,
@@ -118,6 +123,7 @@ const Flag = struct {
 
 const flags = [_]Flag{
     .{ .id = .fix, .long = "--fix", .help = "Apply fixes to the given files instead of only reporting errors." },
+    .{ .id = .exit_zero, .long = "--exit-zero", .help = "Exit nonzero only if a file cannot be read or parsed, not because of errors found or changes made." },
     .{ .id = .no_escape, .long = "--no-escape", .help = "Leave a clause on its line instead of backslash-escaping block syntax it starts with." },
     .{ .id = .max_size_mib, .long = "--max-size-mib", .help = std.fmt.comptimePrint("Maximum file size to read, in MiB (default: {d}).", .{default_max_size_mib}) },
     .{ .id = .help, .long = "--help", .short = "-h", .help = "Print this help message and exit." },
@@ -149,6 +155,7 @@ fn printUsage() void {
 
 const Options = struct {
     fix: bool = false,
+    exit_zero: bool = false,
     escape: bool = true,
     max_size_mib: usize = default_max_size_mib,
     paths: []const []const u8 = &.{},
@@ -179,6 +186,7 @@ const ParseOutcome = union(enum) {
 /// race a read against a write to that file.
 fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !ParseOutcome {
     var fix = false;
+    var exit_zero = false;
     var escape = true;
     var max_size_mib: usize = default_max_size_mib;
     var paths: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -196,6 +204,7 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !ParseOutco
             if (matchFlag(arg)) |flag| {
                 switch (flag.id) {
                     .fix => fix = true,
+                    .exit_zero => exit_zero = true,
                     .no_escape => escape = false,
                     .max_size_mib => {
                         i += 1;
@@ -229,7 +238,7 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !ParseOutco
 
     if (paths.items.len == 0) return .missing_paths;
 
-    return .{ .ok = .{ .fix = fix, .escape = escape, .max_size_mib = max_size_mib, .paths = try paths.toOwnedSlice(allocator) } };
+    return .{ .ok = .{ .fix = fix, .exit_zero = exit_zero, .escape = escape, .max_size_mib = max_size_mib, .paths = try paths.toOwnedSlice(allocator) } };
 }
 
 const FileOutcome = union(enum) {
@@ -301,10 +310,12 @@ fn processFile(
 }
 
 /// Combine the per-file outcomes into a process exit code.
-fn exitCode(fix: bool, any_errors: bool, any_changed: bool) u8 {
-    if (any_errors) return 1;
-    if (fix) return if (any_changed) 1 else 0;
-    return 0;
+/// `any_failed` means a file couldn't be read, parsed, or written;
+/// `any_found` means a file had errors (check) or was changed (`--fix`).
+fn exitCode(exit_zero: bool, any_failed: bool, any_found: bool) u8 {
+    if (any_failed) return 1;
+    if (exit_zero) return 0;
+    return if (any_found) 1 else 0;
 }
 
 pub fn main(init: std.process.Init) !u8 {
@@ -355,23 +366,23 @@ pub fn main(init: std.process.Init) !u8 {
         future.* = std.Io.async(io, processFile, .{ io, gpa, cwd, path, opts.fix, opts.escape, file_size_limit });
     }
 
-    var any_errors = false;
-    var any_changed = false;
+    var any_failed = false;
+    var any_found = false;
     for (opts.paths, futures) |path, *future| {
         switch (future.await(io)) {
             .err => |err| {
                 std.debug.print("{s}: {t}\n", .{ path, err });
-                any_errors = true;
+                any_failed = true;
             },
             .checked => |error_count| {
                 std.debug.print("{s}: {d} error(s)\n", .{ path, error_count });
-                if (error_count > 0) any_errors = true;
+                if (error_count > 0) any_found = true;
             },
             .fixed => |changed| {
-                if (changed) any_changed = true;
+                if (changed) any_found = true;
             },
         }
     }
 
-    return exitCode(opts.fix, any_errors, any_changed);
+    return exitCode(opts.exit_zero, any_failed, any_found);
 }
