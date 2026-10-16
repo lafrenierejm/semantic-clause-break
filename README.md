@@ -1,6 +1,8 @@
 # Semantic Clause Break
 
-This is a CLI application to reformat prose in markdown files such that each independent clause is given its own line in the markdown source.
+A CLI application to reformat prose in markdown files such that each independent clause is given its own line in the markdown source.
+
+This is an implementation of [Semantic Line Breaks](https://sembr.org/).
 The intent is to make diffs easier to parse for humans.
 
 - Each independent clause is given its own line.
@@ -16,6 +18,18 @@ The files to process are provided as CLI arguments.
 - The `--fix` option can be passed to the CLI to apply the changes to the provided files.
   This exits 1 if changes were made and 0 if no changes were needed (i.e. there were no existing errors in any files).
 - The `--exit-zero` option instead exits nonzero only if a file cannot be read or parsed, regardless of `--fix` or any errors found.
+
+## Comparison to Other Tools
+
+| feature                   | semantic-clause-break | SemBr           |
+| ------------------------- | --------------------- | --------------- |
+| deterministic             | ✓                     |                 |
+| independent clauses       | ✓                     | ✓               |
+| dependent clauses         |                       | ✓               |
+| (non-semantic) list items |                       | ✓               |
+| filetypes                 | Markdown              | Markdown, LaTeX |
+
+[SemBr](https://github.com/admk/sembr) uses transformers to analyze and split text.
 
 ## Examples
 
